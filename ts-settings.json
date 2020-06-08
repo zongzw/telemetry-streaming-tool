@@ -1,0 +1,45 @@
+{
+	"templates": {
+		"default": {
+			"class": "Telemetry",
+			"My_System": {
+				"class": "Telemetry_System",
+				"systemPoller": {
+					"interval": 60
+				}
+			},
+			"My_Consumer": {
+				"class": "Telemetry_Consumer",
+				"type": "Generic_HTTP",
+				"host": "10.145.74.87",
+				"protocol": "http",
+				"port": 20001,
+				"path": "/http_input",
+				"method": "POST",
+				"headers": [
+					{
+						"name": "content-type",
+						"value": "application/json"
+					}
+				]
+			}
+		}
+	},
+	"schedules": [
+		{
+			"targets": [
+				"10.145.74.95"
+			],
+			"credential": "admin:admin",
+			"template": "default",
+			"version": "1.12.0"
+		}
+	],
+	"packages": {
+		"1.12.0": {
+			"remotepath": "https://github.com/F5Networks/f5-telemetry-streaming/releases/download/v1.12.0/f5-telemetry-1.12.0-3.noarch.rpm",
+			"filepath": "packages/f5-telemetry-1.12.0-3.noarch.rpm",
+			"sha256sum": "d52ad1ca23df1d9c81a9e3641fc25b593dd0c0a17cc3a90316067ae78e41a990"
+		}
+	}
+}
