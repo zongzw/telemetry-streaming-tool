@@ -14,7 +14,9 @@
             "env": {
                 "GOPATH": "/Users/zong/go"
             },
-            "args": [],
+            "args": [
+                // "-t"
+            ],
             "preLaunchTask": "build"
         }
     ]

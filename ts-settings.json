@@ -13,7 +13,7 @@
 				"type": "Generic_HTTP",
 				"host": "10.145.74.87",
 				"protocol": "http",
-				"port": 20001,
+				"port": 20003,
 				"path": "/http_input",
 				"method": "POST",
 				"headers": [
@@ -28,7 +28,14 @@
 	"schedules": [
 		{
 			"targets": [
-				"10.145.74.95"
+				"10.145.74.95",
+				"10.145.74.55",
+				"10.145.74.78",
+				"10.145.69.238",
+				"10.145.66.217",
+				"10.145.74.69",
+				"10.145.69.178"
+
 			],
 			"credential": "admin:admin",
 			"template": "default",
@@ -40,6 +47,11 @@
 			"remotepath": "https://github.com/F5Networks/f5-telemetry-streaming/releases/download/v1.12.0/f5-telemetry-1.12.0-3.noarch.rpm",
 			"filepath": "packages/f5-telemetry-1.12.0-3.noarch.rpm",
 			"sha256sum": "d52ad1ca23df1d9c81a9e3641fc25b593dd0c0a17cc3a90316067ae78e41a990"
+		},
+		"1.11.0": {
+			"remotepath": "",
+			"filepath": "packages/f5-telemetry-1.11.0-1.noarch.rpm",
+			"sha256sum": "1a3300bccd65a79b9d143711396031217ff96624f4074e47151f6a365cdcc687"
 		}
 	}
 }
