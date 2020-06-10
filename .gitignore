@@ -15,4 +15,4 @@
 # vendor/
 
 packages/*
-ts-tool
+telemetry-streaming-tool
