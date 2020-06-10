@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"encoding/base64"
 	"flag"
+	"sync"
 )
 
 type VerifiedTSInfo struct {
@@ -48,13 +49,23 @@ type Target struct {
 	Credential string
 }
 
-func panic(e error) {
-	if e != nil {
-		log.Fatal(e)
-	}
+const E = "ERROR"
+const I = "INFO"
+const W = "WARN"
+const D = "DEBUG"
+
+func LogMsg(logLevel string, tgt *Target, msg string) string {
+	raw := fmt.Sprintf("[%s] Target %s: %s", logLevel, tgt.Ipaddr, msg)
+	log.Print(raw)
+	return raw
 }
 
-func Upload(client *http.Client, tgt *Target, pkg *Package) {
+func ErrMsg(tgt *Target, msg string) error {
+	return fmt.Errorf(LogMsg(E, tgt, msg))
+}
+
+func Upload(client *http.Client, tgt *Target, pkg *Package) error {
+
 	ps := strings.Split(pkg.Filepath, "/")
 	pkgName := ps[len(ps)-1]
 
@@ -62,10 +73,21 @@ func Upload(client *http.Client, tgt *Target, pkg *Package) {
 	pkgPath := pkg.Filepath
 	finfo, err := os.Stat(pkgPath)
 	if os.IsNotExist(err) {
-		panic(err)
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to get filestat %s: %s", pkgPath, err.Error()),
+		)
 	}
 
 	// TODO: check file's sha256sum
+
+	uploadBody, err := ioutil.ReadFile(pkgPath)
+	if err != nil {
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to read file %s: %s", pkgPath, err.Error()),
+		)
+	}
 
 	uploadUrl := fmt.Sprintf(
 		`https://%s/mgmt/shared/file-transfer/uploads/%s`, 
@@ -73,13 +95,17 @@ func Upload(client *http.Client, tgt *Target, pkg *Package) {
 		pkgName,
 	)
 
-	uploadBody, err := ioutil.ReadFile(pkgPath)
 	reqUpload, err := http.NewRequest(
 		"POST", 
 		uploadUrl, 
 		bytes.NewReader(uploadBody),
 	)
-
+	if err != nil {
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to new upload request: %s", err.Error()),
+		)
+	}
 	// TODO: use sched.Credential
 	reqUpload.Header.Add("Authorization", tgt.Credential)
 	reqUpload.Header.Add("Content-Type", "application/octet-stream")
@@ -91,23 +117,29 @@ func Upload(client *http.Client, tgt *Target, pkg *Package) {
 	reqUpload.Header.Add("Connection", "keep-alive")
 
 	respUpload, err := client.Do(reqUpload)
-	panic(err)
+	if err != nil {
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to request %s: %s", uploadUrl, err.Error()),
+		)
+	}
+
 	defer respUpload.Body.Close()
 
 	if int(respUpload.StatusCode / 200) != 1 {
 		rsp, _ := ioutil.ReadAll(respUpload.Body)
-		panic(
-			fmt.Errorf(
-				"target %s uploading TS package failed: %d, %s", 
-				tgt.Ipaddr, respUpload.StatusCode, rsp,
-			),
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to upload: %d, %s", respUpload.StatusCode, rsp),
 		)
 	} else {
-		log.Printf("target %s uploaded TS package %s", tgt.Ipaddr, pkgName)
+		LogMsg(I, tgt, fmt.Sprintf("uploaded package %s", pkgName))
 	}
+
+	return nil
 }
 
-func Install(client *http.Client, tgt *Target, pkg *Package) {
+func Install(client *http.Client, tgt *Target, pkg *Package) error {
 	ps := strings.Split(pkg.Filepath, "/")
 	pkgName := ps[len(ps)-1]
 
@@ -127,60 +159,82 @@ func Install(client *http.Client, tgt *Target, pkg *Package) {
 		installUrl,
 		strings.NewReader(installBody),
 	)
-	panic(err)
+	if err != nil {
+		return ErrMsg(tgt, 
+			fmt.Sprintf("failed to new install request: %s", err.Error()),
+		)
+	}
 
 	reqInstall.Header.Add("Content-Type", "application/json;charset=UTF-8")
 	reqInstall.Header.Add("Authorization", tgt.Credential)
 	
 	respInstall, err := client.Do(reqInstall)
-	panic(err)
+	if err != nil {
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to request %s: %s", installUrl, err.Error()),
+		)
+	}
 	defer respInstall.Body.Close()
 
 	if int(respInstall.StatusCode / 200) != 1 {
 		rsp, _ := ioutil.ReadAll(respInstall.Body)
-		panic(
-			fmt.Errorf(
-				"target %s installing TS package failed: %d, %s", 
-				tgt.Ipaddr, respInstall.StatusCode, rsp,
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf(
+				"failed to install: %d, %s", respInstall.StatusCode, rsp,
 			),
 		)
 	} else {
-		log.Printf("target %s installed TS package %s", tgt.Ipaddr, pkgName)
+		LogMsg(I, tgt, fmt.Sprintf("installed TS package %s", pkgName))
 	}
+
+	return nil
 }
 
-func Verify(client *http.Client, tgt *Target) *VerifiedTSInfo {
+func Verify(client *http.Client, tgt *Target) (int, *VerifiedTSInfo, error){
 
 	verifyUrl := fmt.Sprintf(
 		`https://%s/mgmt/shared/telemetry/info`, tgt.Ipaddr,
 	)
 
 	reqVerify, err := http.NewRequest("GET", verifyUrl, nil)
-	panic(err)
+	if err != nil {
+		return 0, nil, ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to new verify request: %s", err.Error()),
+		)
+	}
 
 	reqVerify.Header.Add("Authorization", tgt.Credential)
 	
 	respVerify, err := client.Do(reqVerify)
-	panic(err)
+	if err != nil {
+		return 0, nil, ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to request %s: %s", verifyUrl, err.Error()),
+		)
+	}
 	defer respVerify.Body.Close()
 
 	vts := VerifiedTSInfo{}
+	verified, _ := ioutil.ReadAll(respVerify.Body)
 	if respVerify.StatusCode != 200 {
-		body, _ := ioutil.ReadAll(respVerify.Body)
-		log.Printf(
-			"target %s returns %d, body: %s", 
-			tgt.Ipaddr, respVerify.StatusCode, string(body),
-		)
+		return respVerify.StatusCode, nil, nil
 	} else {
-		verifed, _ := ioutil.ReadAll(respVerify.Body)
-		err := json.Unmarshal(verifed, &vts)
-		panic(err)
+		LogMsg(I, tgt, fmt.Sprintf("TS info: %s", string(verified)))
+		err := json.Unmarshal(verified, &vts)
+		if err != nil {
+			return respVerify.StatusCode, nil, ErrMsg(tgt, fmt.Sprintf(
+				"failed to get ts info from response: %s, %s", err, verified,
+			))
+		}
 	}
 
-	return &vts;
+	return 200, &vts, nil;
 }
 
-func Deploy(client *http.Client, tgt *Target, declaration []byte) {
+func Deploy(client *http.Client, tgt *Target, declaration []byte) error {
 	deployUrl := fmt.Sprintf(
 		"https://%s/mgmt/shared/telemetry/declare", tgt.Ipaddr,
 	)
@@ -188,27 +242,41 @@ func Deploy(client *http.Client, tgt *Target, declaration []byte) {
 	reqDeploy, err := http.NewRequest(
 		"POST", deployUrl, bytes.NewReader(declaration),
 	)
+	if err != nil {
+		return ErrMsg(tgt, 
+			fmt.Sprintf("failed to new deploy request: %s", err.Error()),
+		)
+	}
 
 	reqDeploy.Header.Add("Authorization", tgt.Credential)
 
 	respDeploy, err := client.Do(reqDeploy)
-	panic(err)
+	if err != nil {
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to POST %s: %s", deployUrl, err.Error()),
+		)
+	}
 
 	defer respDeploy.Body.Close()
 
 	if int(respDeploy.StatusCode / 200) != 1 {
 		reason, _ := ioutil.ReadAll(respDeploy.Body)
-		panic(
-			fmt.Errorf("target %s deploy template failed: %d, %s.", 
-				tgt.Ipaddr, respDeploy.StatusCode, reason,
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf(
+				"deploy template POST %s: %d, %s.", 
+				deployUrl, respDeploy.StatusCode, reason,
 			),
 		)
 	} else {
-		log.Printf("target %s deployed template successfully", tgt.Ipaddr)
+		LogMsg(I, tgt, fmt.Sprintf("deployed template successfully"))
 	}
+
+	return nil
 }
 
-func GetInstalledPkgs(client *http.Client, tgt *Target) []Package {
+func GetInstalledPkgs(client *http.Client, tgt *Target) ([]Package, error) {
 	queryUrl := fmt.Sprintf(
 		"https://%s/mgmt/shared/iapp/package-management-tasks",
 		tgt.Ipaddr,
@@ -218,56 +286,58 @@ func GetInstalledPkgs(client *http.Client, tgt *Target) []Package {
 	reqGetPkgs, err := http.NewRequest(
 		"POST", queryUrl, bytes.NewReader(queryBody),
 	)
-	panic(err)
+	if err != nil {
+		return []Package{}, ErrMsg(tgt, 
+			fmt.Sprintf("failed to new task query request: %s", err.Error()),
+		)
+	}
 
 	reqGetPkgs.Header.Add("Authorization", tgt.Credential)
 
 	respGetPkgs, err := client.Do(reqGetPkgs)
-	panic(err)
+	if err != nil {
+		return []Package{}, ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to POST %s: %s", queryUrl, err.Error()),
+		)
+	}
 
 	defer respGetPkgs.Body.Close()
 	bd, _ := ioutil.ReadAll(respGetPkgs.Body)
 
 	if int(respGetPkgs.StatusCode / 200) != 1 {	
-		panic(
-			fmt.Errorf(
-				"target %s failed to create query task: %s.",
-				tgt.Ipaddr, bd,
-			),
-		)
+		return []Package{}, ErrMsg(
+			tgt, fmt.Sprintf(
+				"Get Pkgs POST %s - response code %d", 
+				queryUrl, respGetPkgs.StatusCode,
+		))	
 	}
 
 	queryid := gjson.GetBytes(bd, "id")
-	queryUrl = fmt.Sprintf(
-		"https://%s/mgmt/shared/iapp/package-management-tasks/%s",
-		tgt.Ipaddr, queryid,
-	)
-	reqGetPkgs, err = http.NewRequest("GET", queryUrl, nil)
-	panic(err)
 
-	reqGetPkgs.Header.Add("Authorization", tgt.Credential)
+	code, rbd, err := ResultOfPkgMgmtTask(client, tgt, queryid.Str)
+	if code != 200 {
+		// TODO logging it.
+		return []Package{}, ErrMsg(tgt, fmt.Sprintf(
+			"failed to get result %d", code,
+			))
+	} else {
+		pkgsBytes := gjson.GetBytes(rbd, "queryResponse")
 
-	respGetPkgs, err = client.Do(reqGetPkgs)
-	panic(err)
-	defer respGetPkgs.Body.Close()
-
-	bd, _ = ioutil.ReadAll(respGetPkgs.Body)
-	if respGetPkgs.StatusCode != 200 {
-		panic(
-			fmt.Errorf(
-				"target %s failed to get query task result: %s.",
-				tgt.Ipaddr, bd,
-			),
-		)
+		var pkgList []Package
+		e := json.Unmarshal([]byte(pkgsBytes.Raw), &pkgList)
+		if e != nil {
+			return []Package{}, ErrMsg(
+				tgt, 
+				fmt.Sprintf(
+					"failed to parse pkg list from response: %s: %s", 
+					e.Error(), pkgsBytes,
+				),
+			)
+		}
+	
+		return pkgList, nil
 	}
-
-	pkgsBytes := gjson.GetBytes(bd, "queryResponse")
-
-	var pkgList []Package
-	e := json.Unmarshal([]byte(pkgsBytes.Raw), &pkgList)
-	panic(e)
-
-	return pkgList
 }
 
 func ResultOfPkgMgmtTask(
@@ -279,20 +349,35 @@ func ResultOfPkgMgmtTask(
 	)
 
 	reqTask, err := http.NewRequest("GET", taskUrl, nil)
-	panic(err)
+	if err != nil {
+		return 0, []byte{}, ErrMsg(tgt, 
+			fmt.Sprintf("failed to new install request: %s", err.Error()),
+		)
+	}
 
 	reqTask.Header.Add("Authorization", tgt.Credential)
 
 	respTask, err := client.Do(reqTask)
-	panic(err)
+	if err != nil {
+		return 0, []byte{}, ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to GET %s: %s", taskUrl, err.Error()),
+		)
+	}
 	defer respTask.Body.Close()
 
 	bd, _ := ioutil.ReadAll(respTask.Body)
 	return respTask.StatusCode, bd, nil
 }
 
-func Uninstall(client *http.Client, tgt *Target) {
-	pkgList := GetInstalledPkgs(client, tgt)
+func Uninstall(client *http.Client, tgt *Target) error {
+	pkgList, err := GetInstalledPkgs(client, tgt)
+	if err != nil {
+		return ErrMsg(
+			tgt, 
+			fmt.Sprintf("failed to uninstall pkg: %s", err.Error()),
+		)
+	}
 
 	for _, pkg := range pkgList {
 		if pkg.Name == "f5-telemetry" {
@@ -309,38 +394,70 @@ func Uninstall(client *http.Client, tgt *Target) {
 			uninstallReq, err := http.NewRequest(
 				"POST", uninstallUrl, strings.NewReader(uninstallBody),
 			)
-			panic(err)
-
-			uninstallReq.Header.Add("Authorization", tgt.Credential)
-
-			respUninstall, err := client.Do(uninstallReq)
-			panic(err)
-			defer respUninstall.Body.Close()
-
-			bd, _ := ioutil.ReadAll(respUninstall.Body)
-			if int(respUninstall.StatusCode / 200) != 1 {
-				panic(
-					fmt.Errorf(
-						"target %s failed to create uninstall task: %s.",
-						tgt.Ipaddr, bd,
+			if err != nil {
+				return ErrMsg(tgt, 
+					fmt.Sprintf(
+						"failed to new uninstall request: %s", err.Error(),
 					),
 				)
 			}
 
-			log.Printf(
-				"target %s uninstalled package %s", 
-				tgt.Ipaddr, 
-				pkg.PackageName,
+			uninstallReq.Header.Add("Authorization", tgt.Credential)
+
+			respUninstall, err := client.Do(uninstallReq)
+			if err != nil {
+				return ErrMsg(
+					tgt, 
+					fmt.Sprintf(
+						"failed to POST %s: %s", 
+						uninstallUrl, err.Error(),
+					),
+				)
+			}
+		
+			defer respUninstall.Body.Close()
+
+			bd, _ := ioutil.ReadAll(respUninstall.Body)
+			if int(respUninstall.StatusCode / 200) != 1 {
+				return ErrMsg(
+					tgt, 
+					fmt.Sprintf(
+						"uninstall POST %s - response code: %d, %s", 
+						uninstallUrl, respUninstall.StatusCode, bd,
+					),
+				)
+			}
+
+			LogMsg(
+				I, tgt, 
+				fmt.Sprintf("uninstalled package %s", pkg.PackageName),
 			)
 			// TODO: check uninstall status
 			// taskId := gjson.GetBytes(bd, "status")
-			// ResultOfPkgMgmtTask(client, tgt, string(taskId.Raw))
+			// ResultOfPkgMgmtTask(client, tgt, taskId.Str)
 			break
 		}
 	}
+
+	return nil
 }
 
 // TODO: Undeploy
+
+func UpdateStatus(
+	mutex *sync.Mutex, 
+	mapping map[string][]string, 
+	key string, 
+	value string) {
+
+	mutex.Lock()
+	if _, ok := mapping[key]; !ok {
+		mapping[key] = []string{}
+	}
+
+	mapping[key] = append(mapping[key], value)
+	mutex.Unlock()
+}
 
 func Setup(
 	channel chan string, 
@@ -348,24 +465,49 @@ func Setup(
 	tgt *Target, 
 	pkg *Package, 
 	t []byte,
-	rlt map[string]string,
-) {
+	rlt map[string][]string,
+	m *sync.Mutex,
+	wg *sync.WaitGroup,
+) error {
 
 	channel <- tgt.Ipaddr
+	defer func() {
+		<- channel
+		wg.Done()
+	}()
 
-	vts := Verify(client, tgt)
-	if vts.Version != pkg.Version {
-		log.Printf(
-			"target %s TS version is not %s, installing ...",
-			tgt.Ipaddr, pkg.Version,
+	code, vts, err := Verify(client, tgt)
+	if err != nil && code == 0 {
+		UpdateStatus(m, rlt, tgt.Ipaddr, "verify: x")
+		return ErrMsg(tgt, fmt.Sprintf("setup: failed to verify: %s", err))
+	} else {
+		UpdateStatus(m, rlt, tgt.Ipaddr, "verify: y")
+	}
+	
+	if vts == nil || vts.Version != pkg.Version {
+		LogMsg(
+			I, 
+			tgt,
+			fmt.Sprintf("TS version is not %s, installing ...", pkg.Version),
 		)
 
-		Upload(client, tgt, pkg)
-		Install(client, tgt, pkg)
+		err = Upload(client, tgt, pkg)
+		if err != nil {
+			UpdateStatus(m, rlt, tgt.Ipaddr, "upload: x")
+			return ErrMsg(tgt, fmt.Sprintf("setup: failed to upload: %s", err))
+		}
+		UpdateStatus(m, rlt, tgt.Ipaddr, "upload: y")
+		err = Install(client, tgt, pkg)
+		if err != nil {
+			UpdateStatus(m, rlt, tgt.Ipaddr, "install: x")
+			return ErrMsg(tgt, fmt.Sprintf("setup: failed to install: %s", err))
+		}
+		UpdateStatus(m, rlt, tgt.Ipaddr, "install: y")
 	} else {
-		log.Printf(
-			"target %s TS version matched %s, skip.",
-			tgt.Ipaddr, pkg.Version,
+		UpdateStatus(m, rlt, tgt.Ipaddr, "upload: -")
+		UpdateStatus(m, rlt, tgt.Ipaddr, "install: -")
+		LogMsg(
+			I, tgt, fmt.Sprintf("TS version matched %s, skip.", pkg.Version),
 		)
 	}
 
@@ -373,37 +515,62 @@ func Setup(
 		i := 0
 		wait := 20
 		for i < wait {
-			vts := Verify(client, tgt)
-			if vts.Version == pkg.Version {
+			code, vts, err = Verify(client, tgt)
+			if vts != nil && vts.Version == pkg.Version {
 				break
 			}
 			time.Sleep(1 * time.Second)
 			i ++
 		}
 		if i == wait {
-			panic(fmt.Errorf("TS endpoint not available"))
+			UpdateStatus(m, rlt, tgt.Ipaddr, "check: x")
+			return ErrMsg(
+				tgt, 
+				fmt.Sprintf(
+					"setup: TS endpoint not available, waiting timeout.",
+				),
+			)
 		}
-		Deploy(client, tgt, t)
+		UpdateStatus(m, rlt, tgt.Ipaddr, "check: y")
+
+		err := Deploy(client, tgt, t)
+		if err != nil {
+			UpdateStatus(m, rlt, tgt.Ipaddr, "deploy: x")
+			return ErrMsg(tgt, fmt.Sprintf("setup: failed to deploy: %s", err))
+		}
+		UpdateStatus(m, rlt, tgt.Ipaddr, "deploy: y")
 	} else {
-		log.Printf(
-			"target %s skips deploying TS declaration.",
-			tgt.Ipaddr,
-		)
+		UpdateStatus(m, rlt, tgt.Ipaddr, "deploy: -")
+		LogMsg(I, tgt, fmt.Sprintf("skips deploying TS declaration."))
 	}
-	
-	<- channel
+
+	return nil
 }
 
 func Teardown(
 	channel chan string, 
 	client *http.Client, 
 	tgt *Target, 
-	rlt map[string]string,
-) {
+	rlt map[string][]string,
+	m *sync.Mutex,
+	wg *sync.WaitGroup,
+) error {
 	channel <- tgt.Ipaddr
+	defer func() {
+		<- channel
+		wg.Done()
+	}()
 
-	Uninstall(client, tgt)
-	<- channel
+	err := Uninstall(client, tgt)
+	if err != nil {
+		UpdateStatus(m, rlt, tgt.Ipaddr, "uninstall: x")
+		return ErrMsg(
+			tgt, fmt.Sprintf("teardown: failed to uninstall: %s", err),
+		)
+	} else {
+		UpdateStatus(m, rlt, tgt.Ipaddr, "uninstall: y")
+		return nil
+	}
 }
 
 func NewClient() *http.Client {
@@ -427,12 +594,14 @@ func PackageOf(confCnt []byte, name string) *Package {
 		),
 	)
 	if !bpkg.Exists() {
-		panic(fmt.Errorf("%s", "the error test for fmt.Errorf"))
+		panic(fmt.Errorf("packge of name %s doesn't exist", name))
 	}
 	var pkg Package
 	e := json.Unmarshal([]byte(bpkg.Raw), &pkg)
-	panic(e)
-	
+	if e != nil {
+		panic(fmt.Errorf("package format error: %s, %s", bpkg.Raw, e))
+	}
+
 	pkg.Version = name
 
 	return &pkg
@@ -468,24 +637,11 @@ func TargetOf(ipaddr string, cred string) *Target {
 	return &tgt
 }
 
-// type EntryForSetup struct {
-// 	Tgt string
-// 	Tmpl []byte
-// 	Pkg Package
-// 	Cred string
-// }
-
-// func GetSetupEntry(confCnt []byte, ipaddr string, sched Schedule) {
-
-// }
-
 func main() {
 	fmt.Println("Setting up Telemetry Streaming ...")
-	// fmt.Println(os.Args)
 
 	var destroy bool
 	flag.BoolVar(&destroy, "t", false, "Uninstall for all targets.")
-
 	flag.Parse()
 
 	// dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -495,7 +651,9 @@ func main() {
 	path := "./ts-settings.json"
 
 	confCnt, err := ioutil.ReadFile(path)
-	panic(err)
+	if err != nil {
+		panic(err)
+	}
 	if !gjson.Valid(string(confCnt)) {
 		panic(fmt.Errorf("Invalid json format: %s", path))
 	}
@@ -503,15 +661,22 @@ func main() {
 	var schedules []Schedule
 	d := gjson.GetBytes(confCnt, "schedules")
 	e := json.Unmarshal([]byte(d.Raw), &schedules)
-	panic(e)
+	if e != nil {
+		panic(e)
+	}
 
 	client := NewClient()
 
 	// TODO: test big ops -> 1000
 	ops := make(chan string, 2)
 	defer close(ops)
-	count := 0
-	result := map[string]string{}
+	result := map[string][]string{}
+
+	// dat mutation in goroutine
+	mutex := &sync.Mutex{}
+
+	// use sync.WaitGroup to wait goroutines.
+	var wg sync.WaitGroup
 
 	A := func () {
 		for _, s := range schedules {
@@ -521,31 +686,26 @@ func main() {
 				i := TargetOf(ipaddr, s.Credential)
 				p := PackageOf(confCnt, s.Version)
 				t := TemplateOf(confCnt, s.Template)
-				if !destroy {
-					go Setup(ops, client, i, p, t, result)
-				} else {
-					go Teardown(ops, client, i, result)
-				}
 
-				count ++
+				wg.Add(1)
+				if !destroy {
+					go Setup(ops, client, i, p, t, result, mutex, &wg)
+				} else {
+					Teardown(ops, client, i, result, mutex, &wg)
+				}
 			}
 		}
 	}
 
-	// B := func () {
-	// 	i := 0
-	// 	for el :=range ops {
-	// 		fmt.Println(el)
-	// 		i ++
-	// 		if i == count {
-	// 			close(ops)
-	// 		}
-	// 	}
-	// }
+	B := func () {
+		wg.Wait()
+		fmt.Printf("\nRunning Summary\n\n")
+		for k, v := range result {
+			fmt.Printf("%-18s : %v\n", k, v)
+		}
+		fmt.Printf("\n")
+	}
 
-	go A()
-	// B()
-
-	fmt.Print("Enter for quit: ")
-	fmt.Scanln()
+	A()
+	B()
 }
