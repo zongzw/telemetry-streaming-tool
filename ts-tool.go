@@ -54,6 +54,15 @@ const I = "INFO"
 const W = "WARN"
 const D = "DEBUG"
 
+// max cocurrent data transformation 
+var translock = make(chan bool, 2)
+
+// summary writing lock in goroutine
+var mutex = &sync.Mutex{}
+
+// use sync.WaitGroup to wait goroutines.
+var wg sync.WaitGroup
+
 func LogMsg(logLevel string, tgt *Target, msg string) string {
     raw := fmt.Sprintf("[%s] Target %s: %s", logLevel, tgt.Ipaddr, msg)
     log.Print(raw)
@@ -116,6 +125,7 @@ func Upload(client *http.Client, tgt *Target, pkg *Package) error {
     reqUpload.Header.Add("Content-Length", string(finfo.Size()))
     reqUpload.Header.Add("Connection", "keep-alive")
 
+    LogMsg(I, tgt, "Uploading package ...")
     respUpload, err := client.Do(reqUpload)
     if err != nil {
         return ErrMsg(
@@ -371,6 +381,8 @@ func ResultOfPkgMgmtTask(
 }
 
 func Uninstall(client *http.Client, tgt *Target) error {
+    LogMsg(I, tgt, "Uninstalling...")
+
     pkgList, err := GetInstalledPkgs(client, tgt)
     if err != nil {
         return ErrMsg(
@@ -445,7 +457,6 @@ func Uninstall(client *http.Client, tgt *Target) error {
 // TODO: Undeploy
 
 func UpdateStatus(
-    mutex *sync.Mutex, 
     mapping map[string][]string, 
     key string, 
     value string) {
@@ -460,28 +471,26 @@ func UpdateStatus(
 }
 
 func Setup(
-    channel chan string, 
+    execnum chan string,
     client *http.Client, 
     tgt *Target, 
     pkg *Package, 
     t []byte,
     rlt map[string][]string,
-    m *sync.Mutex,
-    wg *sync.WaitGroup,
 ) error {
 
-    channel <- tgt.Ipaddr
+    execnum <- tgt.Ipaddr
     defer func() {
-        <- channel
+        <- execnum
         wg.Done()
     }()
 
     code, vts, err := Verify(client, tgt)
     if err != nil && code == 0 {
-        UpdateStatus(m, rlt, tgt.Ipaddr, "verify: x")
+        UpdateStatus(rlt, tgt.Ipaddr, "verify: x")
         return ErrMsg(tgt, fmt.Sprintf("setup: failed to verify: %s", err))
     } else {
-        UpdateStatus(m, rlt, tgt.Ipaddr, "verify: y")
+        UpdateStatus(rlt, tgt.Ipaddr, "verify: y")
     }
     
     if vts == nil || vts.Version != pkg.Version {
@@ -491,21 +500,27 @@ func Setup(
             fmt.Sprintf("TS version is not %s, installing ...", pkg.Version),
         )
 
+        translock <- true
+        dur := client.Timeout
+        client.Timeout = 240 * time.Second
         err = Upload(client, tgt, pkg)
+        client.Timeout = dur
+        <- translock
+
         if err != nil {
-            UpdateStatus(m, rlt, tgt.Ipaddr, "upload: x")
+            UpdateStatus(rlt, tgt.Ipaddr, "upload: x")
             return ErrMsg(tgt, fmt.Sprintf("setup: failed to upload: %s", err))
         }
-        UpdateStatus(m, rlt, tgt.Ipaddr, "upload: y")
+        UpdateStatus(rlt, tgt.Ipaddr, "upload: y")
         err = Install(client, tgt, pkg)
         if err != nil {
-            UpdateStatus(m, rlt, tgt.Ipaddr, "install: x")
+            UpdateStatus(rlt, tgt.Ipaddr, "install: x")
             return ErrMsg(tgt, fmt.Sprintf("setup: failed to install: %s", err))
         }
-        UpdateStatus(m, rlt, tgt.Ipaddr, "install: y")
+        UpdateStatus(rlt, tgt.Ipaddr, "install: y")
     } else {
-        UpdateStatus(m, rlt, tgt.Ipaddr, "upload: -")
-        UpdateStatus(m, rlt, tgt.Ipaddr, "install: -")
+        UpdateStatus(rlt, tgt.Ipaddr, "upload: -")
+        UpdateStatus(rlt, tgt.Ipaddr, "install: -")
         LogMsg(
             I, tgt, fmt.Sprintf("TS version matched %s, skip.", pkg.Version),
         )
@@ -523,7 +538,7 @@ func Setup(
             i ++
         }
         if i == wait {
-            UpdateStatus(m, rlt, tgt.Ipaddr, "check: x")
+            UpdateStatus(rlt, tgt.Ipaddr, "check: x")
             return ErrMsg(
                 tgt, 
                 fmt.Sprintf(
@@ -531,16 +546,16 @@ func Setup(
                 ),
             )
         }
-        UpdateStatus(m, rlt, tgt.Ipaddr, "check: y")
+        UpdateStatus(rlt, tgt.Ipaddr, "check: y")
 
         err := Deploy(client, tgt, t)
         if err != nil {
-            UpdateStatus(m, rlt, tgt.Ipaddr, "deploy: x")
+            UpdateStatus(rlt, tgt.Ipaddr, "deploy: x")
             return ErrMsg(tgt, fmt.Sprintf("setup: failed to deploy: %s", err))
         }
-        UpdateStatus(m, rlt, tgt.Ipaddr, "deploy: y")
+        UpdateStatus(rlt, tgt.Ipaddr, "deploy: y")
     } else {
-        UpdateStatus(m, rlt, tgt.Ipaddr, "deploy: -")
+        UpdateStatus(rlt, tgt.Ipaddr, "deploy: -")
         LogMsg(I, tgt, fmt.Sprintf("skips deploying TS declaration."))
     }
 
@@ -548,27 +563,25 @@ func Setup(
 }
 
 func Teardown(
-    channel chan string, 
+    execnum chan string,
     client *http.Client, 
     tgt *Target, 
     rlt map[string][]string,
-    m *sync.Mutex,
-    wg *sync.WaitGroup,
 ) error {
-    channel <- tgt.Ipaddr
+    execnum <- tgt.Ipaddr
     defer func() {
-        <- channel
+        <- execnum
         wg.Done()
     }()
 
     err := Uninstall(client, tgt)
     if err != nil {
-        UpdateStatus(m, rlt, tgt.Ipaddr, "uninstall: x")
+        UpdateStatus(rlt, tgt.Ipaddr, "uninstall: x")
         return ErrMsg(
             tgt, fmt.Sprintf("teardown: failed to uninstall: %s", err),
         )
     } else {
-        UpdateStatus(m, rlt, tgt.Ipaddr, "uninstall: y")
+        UpdateStatus(rlt, tgt.Ipaddr, "uninstall: y")
         return nil
     }
 }
@@ -579,7 +592,7 @@ func NewClient() *http.Client {
     }
     client := http.Client{
         Transport: tr,
-        Timeout: time.Duration(2 * time.Minute),
+        Timeout: time.Duration(30 * time.Second),
     }
 
     return &client
@@ -641,9 +654,12 @@ func main() {
     fmt.Println("Setting up Telemetry Streaming on BIG-IP ...")
 
 	var destroy bool
-	var cocurrency int
+    var cocurrency int
+    var configFile string
 	flag.BoolVar(&destroy, "d", false, "Uninstall for all targets.")
-	flag.IntVar(&cocurrency, "n", 3, "Cocurrency count for executions.")
+    flag.IntVar(&cocurrency, "n", 3, "Cocurrent execution count.")
+    flag.StringVar(
+        &configFile, "f", "./ts-settings.json", "Configuration for execution.")
     flag.Parse()
 
     // dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -667,32 +683,27 @@ func main() {
         panic(e)
     }
 
-    client := NewClient()
-
-    ops := make(chan string, cocurrency)
-    defer close(ops)
+    // max cocurent execution
+    execnum := make(chan string, cocurrency)
+    defer close(execnum)
     result := map[string][]string{}
-
-    // dat mutation in goroutine
-    mutex := &sync.Mutex{}
-
-    // use sync.WaitGroup to wait goroutines.
-    var wg sync.WaitGroup
 
     A := func () {
         for _, s := range schedules {
             // TODO: removing duplicate ipaddrs in s.Targets
             // TODO: expending ipaddr range like: 10.145.74.75-79 
             for _, ipaddr := range s.Targets {
+
+                client := NewClient()
                 i := TargetOf(ipaddr, s.Credential)
                 p := PackageOf(confCnt, s.Version)
                 t := TemplateOf(confCnt, s.Template)
 
                 wg.Add(1)
                 if !destroy {
-                    go Setup(ops, client, i, p, t, result, mutex, &wg)
+                    go Setup(execnum, client, i, p, t, result)
                 } else {
-                    Teardown(ops, client, i, result, mutex, &wg)
+                    go Teardown(execnum, client, i, result)
                 }
             }
         }
