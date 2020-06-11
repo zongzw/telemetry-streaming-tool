@@ -325,29 +325,43 @@ func GetInstalledPkgs(client *http.Client, tgt *Target) ([]Package, error) {
 
     queryid := gjson.GetBytes(bd, "id")
 
-    code, rbd, err := ResultOfPkgMgmtTask(client, tgt, queryid.Str)
-    if code != 200 {
-        // TODO logging it.
-        return []Package{}, ErrMsg(tgt, fmt.Sprintf(
-            "failed to get result %d", code,
-            ))
-    } else {
-        pkgsBytes := gjson.GetBytes(rbd, "queryResponse")
-
-        var pkgList []Package
-        e := json.Unmarshal([]byte(pkgsBytes.Raw), &pkgList)
-        if e != nil {
-            return []Package{}, ErrMsg(
-                tgt, 
-                fmt.Sprintf(
-                    "failed to parse pkg list from response: %s: %s", 
-                    e.Error(), pkgsBytes,
-                ),
-            )
+    i := 0
+    wait := 30
+    for i < wait {
+        i ++
+        code, rbd, err := ResultOfPkgMgmtTask(client, tgt, queryid.Str)
+        if err != nil || code != 200 {
+            // TODO logging it.
+            return []Package{}, ErrMsg(tgt, fmt.Sprintf(
+                "failed to get result %d", code,
+                ))
+        } else {
+            status := gjson.GetBytes(rbd, "status")
+            if status.Str == "FINISHED" {
+                pkgsBytes := gjson.GetBytes(rbd, "queryResponse")
+        
+                var pkgList []Package
+                e := json.Unmarshal([]byte(pkgsBytes.Raw), &pkgList)
+                if e != nil {
+                    return []Package{}, ErrMsg(
+                        tgt, 
+                        fmt.Sprintf(
+                            "failed to parse pkg list from response: %s: %s", 
+                            e.Error(), pkgsBytes,
+                        ),
+                    )
+                }
+            
+                return pkgList, nil
+            } else {
+                time.Sleep(100 * time.Millisecond)
+            }
         }
-    
-        return pkgList, nil
     }
+
+    return []Package{}, ErrMsg(
+        tgt, fmt.Sprintf("failed to get pkg list, timeout."),
+    )
 }
 
 func ResultOfPkgMgmtTask(
@@ -382,7 +396,8 @@ func ResultOfPkgMgmtTask(
 
 func Uninstall(client *http.Client, tgt *Target) error {
     LogMsg(I, tgt, "Uninstalling...")
-
+    defer LogMsg(I, tgt, "Uninstall finished")
+    
     pkgList, err := GetInstalledPkgs(client, tgt)
     if err != nil {
         return ErrMsg(
