@@ -63,6 +63,9 @@ var mutex = &sync.Mutex{}
 // use sync.WaitGroup to wait goroutines.
 var wg sync.WaitGroup
 
+// cocurrency number for execution
+var execnum chan string
+
 func LogMsg(logLevel string, tgt *Target, msg string) string {
     raw := fmt.Sprintf("[%s] Target %s: %s", logLevel, tgt.Ipaddr, msg)
     log.Print(raw)
@@ -74,6 +77,8 @@ func ErrMsg(tgt *Target, msg string) error {
 }
 
 func Upload(client *http.Client, tgt *Target, pkg *Package) error {
+
+    LogMsg(I, tgt, "uploading TS package")
 
     ps := strings.Split(pkg.Filepath, "/")
     pkgName := ps[len(ps)-1]
@@ -150,6 +155,9 @@ func Upload(client *http.Client, tgt *Target, pkg *Package) error {
 }
 
 func Install(client *http.Client, tgt *Target, pkg *Package) error {
+
+    LogMsg(I, tgt, "installing TS package")
+
     ps := strings.Split(pkg.Filepath, "/")
     pkgName := ps[len(ps)-1]
 
@@ -204,6 +212,8 @@ func Install(client *http.Client, tgt *Target, pkg *Package) error {
 
 func Verify(client *http.Client, tgt *Target) (int, *VerifiedTSInfo, error){
 
+    LogMsg(I, tgt, "verifying TS version")
+
     verifyUrl := fmt.Sprintf(
         `https://%s/mgmt/shared/telemetry/info`, tgt.Ipaddr,
     )
@@ -245,6 +255,9 @@ func Verify(client *http.Client, tgt *Target) (int, *VerifiedTSInfo, error){
 }
 
 func Deploy(client *http.Client, tgt *Target, declaration []byte) error {
+    
+    LogMsg(I, tgt, "deploying TS declaration")
+
     deployUrl := fmt.Sprintf(
         "https://%s/mgmt/shared/telemetry/declare", tgt.Ipaddr,
     )
@@ -486,7 +499,6 @@ func UpdateStatus(
 }
 
 func Setup(
-    execnum chan string,
     client *http.Client, 
     tgt *Target, 
     pkg *Package, 
@@ -578,7 +590,6 @@ func Setup(
 }
 
 func Teardown(
-    execnum chan string,
     client *http.Client, 
     tgt *Target, 
     rlt map[string][]string,
@@ -698,8 +709,7 @@ func main() {
         panic(e)
     }
 
-    // max cocurent execution
-    execnum := make(chan string, cocurrency)
+    execnum = make(chan string, cocurrency)
     defer close(execnum)
     result := map[string][]string{}
 
@@ -716,9 +726,9 @@ func main() {
 
                 wg.Add(1)
                 if !destroy {
-                    go Setup(execnum, client, i, p, t, result)
+                    go Setup(client, i, p, t, result)
                 } else {
-                    go Teardown(execnum, client, i, result)
+                    go Teardown(client, i, result)
                 }
             }
         }
